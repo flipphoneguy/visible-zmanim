@@ -179,13 +179,13 @@ class RemoteCog:
         inside = (ix >= -1) & (ix < lv.width) & (iy >= -1) & (iy < lv.height)
         if not inside.any():
             return []
-        cols = np.clip(ix[inside], 0, lv.width - 1) // lv.block_w
-        rows = np.clip(iy[inside], 0, lv.height - 1) // lv.block_h
-        keys = np.unique(rows * 1_000_000 + cols)
-        blocks = [(int(k // 1_000_000), int(k % 1_000_000)) for k in keys]
-        blocks += [(r + dr, c + dc) for r, c in blocks for dr, dc in ((0, 1), (1, 0), (1, 1))]
-        n_rows, n_cols = -(-lv.height // lv.block_h), -(-lv.width // lv.block_w)
-        blocks = sorted({b for b in blocks if b[0] < n_rows and b[1] < n_cols})
+        ix, iy = ix[inside], iy[inside]
+        keys = []
+        for dy, dx in ((0, 0), (0, 1), (1, 0), (1, 1)):
+            cols = np.clip(ix + dx, 0, lv.width - 1) // lv.block_w
+            rows = np.clip(iy + dy, 0, lv.height - 1) // lv.block_h
+            keys.append(np.unique(rows * 1_000_000 + cols))
+        blocks = sorted((int(k // 1_000_000), int(k % 1_000_000)) for k in np.unique(np.concatenate(keys)))
         self.ensure(level, blocks)
         return blocks
 
