@@ -49,7 +49,6 @@ def plan(terrain: Terrain, bbox, *, relative_step=DEFAULT_HORIZON.relative_step,
     jobs = []
     lon0, lat0, lon1, lat1 = bbox
     us = terrain.use_usgs and terrain._maybe_us((lat0 + lat1) / 2, (lon0 + lon1) / 2)
-    gedtm_from = terrain.bands.usgs13_max_m if us else 0.0
 
     if us:
         lidar_box = _expand(bbox, terrain.bands.lidar_max_m)
@@ -90,11 +89,10 @@ def plan(terrain: Terrain, bbox, *, relative_step=DEFAULT_HORIZON.relative_step,
                     if x_min < x_max and y_min < y_max:
                         jobs.append((cog, lv, cog.blocks_for_bbox(lv, x_min, y_min, x_max, y_max)))
 
+    # GEDTM also fills in wherever USGS has no data (open sea, across the border), so it is needed at every distance.
     g = terrain.gedtm
     res0 = g.meta["levels"][0].res * M_PER_DEG
     for lv, reach in _level_reach(res0, len(g.meta["levels"]), relative_step, max_d):
-        if reach < gedtm_from:
-            continue
         b = _expand(bbox, reach)
         jobs.append((g, lv, g.blocks_for_bbox(lv, *b)))
     return jobs
