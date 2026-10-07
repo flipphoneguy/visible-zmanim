@@ -18,8 +18,8 @@ from .zmanim import compute
 
 MAX_DAYS = 366
 DEFAULT_EYE_HEIGHT_M = 1.7
-DEFAULT_WAIT_S = 20.0
-MAX_WAIT_S = 25.0
+DEFAULT_WAIT_S = 15.0
+MAX_WAIT_S = 20.0
 VARIANTS = ("sea_level", "elevation", "visible")
 NUMERIC_KEYS = {"shaah_zmanis_gra_s", "shaah_zmanis_mga_72_s", "sunrise_azimuth", "sunset_azimuth"}
 ATTRIBUTION = {
@@ -73,7 +73,10 @@ def _float(params, name, default=None, lo=-math.inf, hi=math.inf):
 
 def _list(params, name):
     raw = params.get(name)
-    return None if raw in (None, "") else [x.strip() for x in str(raw).split(",") if x.strip()]
+    if raw in (None, "", []):
+        return None
+    items = raw if isinstance(raw, (list, tuple)) else str(raw).split(",")
+    return [str(x).strip() for x in items if str(x).strip()]
 
 
 def _dates(params, tz):
