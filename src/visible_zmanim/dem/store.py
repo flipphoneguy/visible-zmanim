@@ -95,6 +95,19 @@ class TileStore:
                 _, old = self._mem.popitem(last=False)
                 self._mem_bytes -= old.nbytes
 
+    def promote(self, rel: str) -> bool:
+        """Move a cached file into the pinned store. False if it isn't cached."""
+        src = self.cache / rel
+        if not src.exists():
+            return False
+        dst = self.pinned / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(src, dst)
+        except FileNotFoundError:
+            return False
+        return True
+
     def load_json(self, rel: str):
         p = self.find(rel)
         return None if p is None else json.loads(p.read_text())

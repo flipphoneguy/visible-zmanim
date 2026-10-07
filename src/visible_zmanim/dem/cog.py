@@ -121,7 +121,13 @@ class RemoteCog:
     def ensure(self, level, blocks, pinned=False):
         """Download any of the (row, col) blocks not on disk yet. With ``pinned`` they go to the pinned store."""
         if pinned:
-            todo = [b for b in blocks if not (self.store.pinned / self._rel(level, *b)).exists()]
+            todo = []
+            for b in blocks:
+                rel = self._rel(level, *b)
+                if (self.store.pinned / rel).exists():
+                    continue
+                if not self.store.promote(rel):
+                    todo.append(b)
         else:
             todo = [b for b in blocks if self.store.find(self._rel(level, *b)) is None]
         if not todo:
