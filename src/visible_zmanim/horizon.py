@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -181,3 +184,58 @@ def get_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = 
     p = compute_profile(lat, lon, eye_height_m, terrain=terrain, physics=physics, settings=settings, ground_m=ground_m)
     p.save(path)
     return p
+
+
+_running: dict[str, threading.Event] = {}
+_running_lock = threading.Lock()
+ERROR_TTL_S = 600
+
+
+class ProfileError(Exception):
+    pass
+
+
+def get_profile_async(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, wait_s: float = 20.0, cache_dir: Path | None = None) -> Profile | None:
+    """Like get_profile, but gives up after wait_s and returns None while the computation continues in the background. Only one process computes a given profile at a time."""
+    folder = Path(cache_dir or data_dir() / "horizon")
+    folder.mkdir(parents=True, exist_ok=True)
+    key = profile_key(lat, lon, eye_height_m, ground_m, physics, settings, terrain)
+    path, err = folder / f"{key}.npz", folder / f"{key}.error"
+    if path.exists():
+        return Profile.load(path)
+    if err.exists():
+        if time.time() - err.stat().st_mtime < ERROR_TTL_S:
+            raise ProfileError(err.read_text())
+        err.unlink(missing_ok=True)
+    with _running_lock:
+        event = _running.get(key)
+        if event is None:
+            lock = open(folder / f"{key}.lock", "w")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock.close()
+                return None
+            if path.exists():
+                lock.close()
+                return Profile.load(path)
+            event = _running[key] = threading.Event()
+
+            def run():
+                try:
+                    compute_profile(lat, lon, eye_height_m, terrain=terrain, physics=physics, settings=settings, ground_m=ground_m).save(path)
+                except Exception as e:
+                    err.write_text(f"{type(e).__name__}: {e}")
+                finally:
+                    lock.close()
+                    with _running_lock:
+                        _running.pop(key, None)
+                    event.set()
+
+            threading.Thread(target=run, daemon=True).start()
+    event.wait(wait_s)
+    if path.exists():
+        return Profile.load(path)
+    if err.exists():
+        raise ProfileError(err.read_text())
+    return None

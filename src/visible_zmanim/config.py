@@ -33,7 +33,7 @@ class HorizonSettings:
     # radial step = max(min_step_m, distance * relative_step)
     min_step_m: float = 2.0
     relative_step: float = 0.002
-    min_distance_m: float = 0.0
+    min_distance_m: float = 100.0
     max_distance_m: float = 200_000.0
     geodesic_node_spacing_m: float = 5_000.0
 
