@@ -177,7 +177,7 @@ def profile_key(lat, lon, eye_height_m, ground_m, physics: Physics, settings: Ho
 
 
 def get_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, cache_dir: Path | None = None) -> Profile:
-    folder = Path(cache_dir or data_dir() / "horizon")
+    folder = Path(cache_dir or data_dir() / "dem" / "cache" / "horizon")
     path = folder / f"{profile_key(lat, lon, eye_height_m, ground_m, physics, settings, terrain)}.npz"
     if path.exists():
         return Profile.load(path)
@@ -197,7 +197,7 @@ class ProfileError(Exception):
 
 def get_profile_async(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, wait_s: float = 20.0, cache_dir: Path | None = None) -> Profile | None:
     """Like get_profile, but gives up after wait_s and returns None while the computation continues in the background. Only one process computes a given profile at a time."""
-    folder = Path(cache_dir or data_dir() / "horizon")
+    folder = Path(cache_dir or data_dir() / "dem" / "cache" / "horizon")
     folder.mkdir(parents=True, exist_ok=True)
     key = profile_key(lat, lon, eye_height_m, ground_m, physics, settings, terrain)
     path, err = folder / f"{key}.npz", folder / f"{key}.error"
