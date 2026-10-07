@@ -19,6 +19,7 @@
 | `refraction` | `34` | Horizontal refraction in arcminutes. |
 | `k` | `0.13` | Terrestrial refraction coefficient. |
 | `wait` | `15` | Seconds to wait for a new horizon before answering 202 (max 20). |
+| `include` | | `horizon` adds the skyline and the sun's path around visible sunrise and sunset (single date only), for drawing. |
 
 ## Status codes
 
@@ -94,6 +95,19 @@ The same fields in each, computed from that version's sunrise and sunset. A GRA 
 | `sunrise_azimuth`, `sunset_azimuth` | Compass direction of the sun at those moments, degrees from true north. |
 
 `visible` also has `sunrise_details` and `sunset_details`. `blocking` is the terrain point the sun clears in that direction: its position, distance, height above sea level, the angle it appears at from the observer, and which dataset the height came from. When nothing in range is higher than the sea horizon, the sea horizon itself is reported with source `sea_level`. `vs_sea_level_s` is the difference from the `sea_level` time in seconds.
+
+### `horizon`
+
+Only with `include=horizon` and a single date. For each of `sunrise` and `sunset`:
+
+| Field | Meaning |
+|---|---|
+| `azimuth_start`, `azimuth_step` | The skyline covers 24° centered on the sun's direction at the event, in 0.1° steps. |
+| `terrain_deg` | Apparent angle of the skyline above the flat horizon for each step (negative when looking down). |
+| `sun_path` | `time`, `azimuth` and `altitude_deg` of the sun's center every 30 s for 40 minutes either side of the event, as it appears through the same refraction the calculation uses. |
+| `sun_radius_deg` | The sun's apparent radius. |
+
+At the event time the sun's top edge (`altitude_deg + sun_radius_deg`) is exactly on the skyline.
 
 ## Differences from KosherJava
 

@@ -20,6 +20,10 @@ MAX_DAYS = 366
 DEFAULT_EYE_HEIGHT_M = 1.7
 DEFAULT_WAIT_S = 15.0
 MAX_WAIT_S = 20.0
+VIEW_HALF_WIDTH_DEG = 12.0
+VIEW_STEP_DEG = 0.1
+VIEW_PATH_S = 40 * 60
+VIEW_PATH_STEP_S = 30
 VARIANTS = ("sea_level", "elevation", "visible")
 NUMERIC_KEYS = {"shaah_zmanis_gra_s", "shaah_zmanis_mga_72_s", "sunrise_azimuth", "sunset_azimuth"}
 ATTRIBUTION = {
@@ -156,6 +160,7 @@ def _handle(params) -> tuple[int, dict]:
     if unknown:
         raise BadRequest(f"unknown variants: {', '.join(sorted(unknown))}")
     fields = _list(params, "fields")
+    include = _list(params, "include") or []
 
     height = _float(params, "height", DEFAULT_EYE_HEIGHT_M, lo=0, hi=1000)
     ground_given = _float(params, "ground", lo=-500, hi=9000)
@@ -218,12 +223,46 @@ def _handle(params) -> tuple[int, dict]:
         "sources": ATTRIBUTION,
         "version": version("visible-zmanim"),
     }
+    if "horizon" in include and profile is not None and len(dates) == 1 and "visible" in res["variants"]:
+        body["horizon"] = {e: _horizon_view(profile, res["variants"]["visible"], e, lat, lon, eye, physics, tz) for e in ("sunrise", "sunset")}
     if pending:
         body["status"] = "computing"
         body["retry_after_s"] = 15
         body["message"] = "The visible horizon for this location is being computed (terrain data is downloaded the first time an area is used). Retry the same request shortly."
         return 202, body
     return 200, body
+
+
+def _horizon_view(profile, visible, event, lat, lon, eye, physics, tz):
+    """Skyline around the event direction and the sun's apparent path past it. The path is shifted by the same refraction the threshold uses, so the sun's edge touches the skyline exactly at the computed time."""
+    t_event, az_event = visible[event][0], visible[f"{event}_azimuth"][0]
+    if not (np.isfinite(t_event) and np.isfinite(az_event)):
+        return None
+    az = az_event + np.arange(-VIEW_HALF_WIDTH_DEG, VIEW_HALF_WIDTH_DEG + VIEW_STEP_DEG / 2, VIEW_STEP_DEG)
+    bins = profile.bin(az)
+    ok = profile.computed[bins]
+    terrain = np.where(ok, profile.block_e[bins], np.nan)
+
+    times = t_event + np.arange(-VIEW_PATH_S, VIEW_PATH_S + 1, VIEW_PATH_STEP_S)
+    track = Sun.shared().track(lat, lon, eye, times[0], times[-1])
+    alt, saz, dist = track.altaz(times)
+    sb = profile.bin(saz)
+    lift = profile.block_e[sb] - profile.threshold[sb]
+    inside = np.abs((saz - az_event + 180) % 360 - 180) <= VIEW_HALF_WIDTH_DEG
+    def hms(t):
+        return dt.datetime.fromtimestamp(round(float(t)), tz).strftime("%H:%M:%S")
+
+    return {
+        "azimuth_start": round(float(az[0]) % 360, 2),
+        "azimuth_step": VIEW_STEP_DEG,
+        "terrain_deg": [None if not np.isfinite(v) else round(float(v), 3) for v in terrain],
+        "sun_radius_deg": round(float(track.semidiameter(dist[0], physics)), 4),
+        "sun_path": {
+            "time": [hms(t) for t in times[inside]],
+            "azimuth": [round(float(a), 3) for a in saz[inside]],
+            "altitude_deg": [round(float(v), 3) for v in (alt + lift)[inside]],
+        },
+    }
 
 
 def _section(data, i, tz, fields):
