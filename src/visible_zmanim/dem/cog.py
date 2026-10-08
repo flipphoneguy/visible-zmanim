@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 import rasterio
+import requests
 from rasterio.errors import RasterioIOError
 from rasterio.windows import Window
 
@@ -20,6 +22,7 @@ GDAL_ENV = {
     "CPL_VSIL_CURL_USE_HEAD": "NO",
 }
 FETCH_THREADS = 8
+RETRIES = 4
 MOSAIC_MAX_PIXELS = 64_000_000
 
 
@@ -50,6 +53,16 @@ class RemoteCog:
         self._meta = None
         self._meta_lock = threading.Lock()
 
+    def _retry(self, level, fn):
+        for attempt in range(RETRIES):
+            try:
+                return fn()
+            except RasterioIOError:
+                if attempt == RETRIES - 1:
+                    raise
+                getattr(self._local, "handles", {}).pop((self.url, level), None)
+                time.sleep(2 ** attempt)
+
     def _open(self, level: int):
         handles = getattr(self._local, "handles", None)
         if handles is None:
@@ -77,16 +90,13 @@ class RemoteCog:
             return self._meta
 
     def _read_meta(self) -> dict:
-        try:
-            with rasterio.Env(**GDAL_ENV), rasterio.open(self.url) as ds:
-                factors = ds.overviews(1)
-                crs = ds.crs.to_wkt()
-                nodata = ds.nodata
-        except RasterioIOError:
+        if requests.head(self.url, timeout=30, allow_redirects=True).status_code == 404:
             return {"missing": True}
+        ds = self._retry(0, lambda: self._open(0))
+        factors, crs, nodata = ds.overviews(1), ds.crs.to_wkt(), ds.nodata
         levels = []
         for lv in range(len(factors) + 1):
-            ds = self._open(lv)
+            ds = self._retry(lv, lambda lv=lv: self._open(lv))
             t = ds.transform
             bh, bw = ds.block_shapes[0]
             levels.append({"transform": (t.c, t.a, 0.0, t.f, 0.0, t.e), "width": ds.width, "height": ds.height, "block_w": bw, "block_h": bh})
@@ -105,7 +115,7 @@ class RemoteCog:
         lv = self.meta["levels"][level]
         x0, y0 = c * lv.block_w, r * lv.block_h
         w, h = min(lv.block_w, lv.width - x0), min(lv.block_h, lv.height - y0)
-        data = self._open(level).read(1, window=Window(x0, y0, w, h)).astype(np.float32)
+        data = self._retry(level, lambda: self._open(level).read(1, window=Window(x0, y0, w, h))).astype(np.float32)
         nodata = self.meta["nodata"]
         bad = ~np.isfinite(data) | (np.abs(data) > 1e5)
         if nodata is not None:
