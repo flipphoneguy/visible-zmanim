@@ -23,6 +23,8 @@ WGS84_E2 = 6.69437999014e-3
 OBLIQUITY = 23.44
 ARC_MARGIN_DEG = 25.0
 RAY_BATCH = 200
+EDGE_BINS = 20
+EDGE_EXTEND_DEG = 1.0
 PROFILE_THREADS = min(4, os.cpu_count() or 1)
 PROFILE_VERSION = 1
 _GEOD = Geod(ellps="WGS84")
@@ -167,6 +169,14 @@ def compute_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physic
 
     with ThreadPoolExecutor(PROFILE_THREADS) as pool:
         list(pool.map(batch, range(0, len(ray_az), RAY_BATCH)))
+        # In a deep valley the sun can clear the mountains far from its usual rising direction, so high ground at an arc's edge means the rest of the circle is needed too.
+        edges = np.flatnonzero(computed != np.roll(computed, 1)) if not computed.all() else []
+        near_edge = np.concatenate([np.arange(e - EDGE_BINS, e + EDGE_BINS) % n_bins for e in edges]) if len(edges) else np.array([], int)
+        near_edge = near_edge[computed[near_edge]]
+        if len(near_edge) and thr[near_edge].max() > EDGE_EXTEND_DEG:
+            ray_az, bins_idx = all_az[~computed], np.flatnonzero(~computed)
+            computed = np.ones(n_bins, dtype=bool)
+            list(pool.map(batch, range(0, len(ray_az), RAY_BATCH)))
 
     return Profile(lat=lat, lon=lon, ground_m=ground_m, eye_height_m=eye_height_m, step=settings.azimuth_step_deg, threshold=thr, block_d=out["d"], block_h=out["h"], block_e=out["e"], block_lat=out["lat"], block_lon=out["lon"], computed=computed, block_src=block_src, ground_source=ground_source)
 
