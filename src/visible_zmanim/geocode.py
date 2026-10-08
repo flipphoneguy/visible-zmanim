@@ -19,6 +19,14 @@ class GeocodeError(Exception):
     pass
 
 
+class AddressNotFound(GeocodeError):
+    pass
+
+
+class GeocoderUnavailable(GeocodeError):
+    pass
+
+
 def _cache_path(query: str) -> Path:
     key = hashlib.sha1(" ".join(query.lower().split()).encode()).hexdigest()
     return data_dir() / "geocode" / f"{key}.json"
@@ -73,9 +81,9 @@ def geocode(query: str) -> dict:
             if census:
                 result = census
     except requests.RequestException as e:
-        raise GeocodeError(f"geocoding failed: {e}") from e
+        raise GeocoderUnavailable(f"address lookup is unavailable right now: {e}") from e
     if result is None:
-        raise GeocodeError(f"no match for {query!r}")
+        raise AddressNotFound(f"no match for {query!r}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result))
     return result

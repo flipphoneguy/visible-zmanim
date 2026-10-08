@@ -13,14 +13,24 @@ CANDLE_LIGHTING_MIN = 18.0
 DEGREE_ZMANIM = {"alos_16_1": (-16.1, True), "tzais_16_1": (-16.1, False), "tzais_8_5": (-8.5, False)}
 
 
-def solar_noon_guess(dates, lon):
+def solar_noon_guess(dates, lon, tz=None):
+    """12:00 local time on each date, so the date means the calendar day at the location even where the time zone is far from the longitude (Samoa, Kiribati, the Aleutians)."""
+    if tz is not None:
+        return np.array([dt.datetime(d.year, d.month, d.day, 12, tzinfo=tz).timestamp() for d in dates])
     midnight = np.array([dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp() for d in dates])
     return midnight + HALF_DAY - lon / 15.0 * 3600.0
 
 
+CHUNK_DAYS = 31
+
+
 def _rise_set(noon, margin, step, iterations):
-    rise = find_crossings(margin, noon - HALF_DAY, noon, step, rising=True, iterations=iterations)
-    set_ = find_crossings(margin, noon, noon + HALF_DAY, step, rising=False, iterations=iterations)
+    # A month at a time keeps the scan's temporary arrays small for long date ranges.
+    rise, set_ = np.empty_like(noon), np.empty_like(noon)
+    for i in range(0, len(noon), CHUNK_DAYS):
+        n = noon[i:i + CHUNK_DAYS]
+        rise[i:i + CHUNK_DAYS] = find_crossings(margin, n - HALF_DAY, n, step, rising=True, iterations=iterations)
+        set_[i:i + CHUNK_DAYS] = find_crossings(margin, n, n + HALF_DAY, step, rising=False, iterations=iterations)
     return rise, set_
 
 
@@ -69,10 +79,10 @@ def derived(sunrise, sunset):
     }
 
 
-def compute(lat, lon, height_m, dates, *, physics: Physics = DEFAULT_PHYSICS, profile=None, variants=("sea_level", "elevation", "visible"), sun: Sun | None = None):
-    """Zmanim as unix seconds (NaN where the event doesn't happen) for each date. ``height_m`` is the eye height above sea level."""
+def compute(lat, lon, height_m, dates, *, physics: Physics = DEFAULT_PHYSICS, profile=None, variants=("sea_level", "elevation", "visible"), sun: Sun | None = None, tz=None):
+    """Zmanim as unix seconds (NaN where the event doesn't happen) for each date. ``height_m`` is the eye height above sea level, ``tz`` the location's time zone (a tzinfo)."""
     sun = sun or Sun.shared()
-    noon_guess = solar_noon_guess(dates, lon)
+    noon_guess = solar_noon_guess(dates, lon, tz)
     track = sun.track(lat, lon, height_m, noon_guess.min() - DAY, noon_guess.max() + DAY)
     noon = track.transits(noon_guess)
 

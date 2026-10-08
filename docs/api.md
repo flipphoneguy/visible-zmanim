@@ -13,7 +13,7 @@
 | `height` | `1.7` | Eye height above the ground in meters. Use it for an upper floor or a roof. |
 | `ground` | from terrain data | Ground elevation in meters above sea level, if you know it better than the elevation data. |
 | `min_distance` | `100` | Ignore terrain closer than this many meters. Very close ground (a slope across the street) usually shouldn't count. Set `0` to include everything. |
-| `variants` | all | Comma list of `sea_level`, `elevation`, `visible`. Leaving out `visible` skips terrain entirely and is always fast. |
+| `variants` | all | Comma list of `sea_level`, `elevation`, `visible`. Leaving out `visible` skips the horizon calculation. `sea_level` alone skips terrain data entirely. |
 | `fields` | all | Comma list of zman names to keep (for example `sunrise,sunset,sof_zman_shma_gra`). Applies to every section. In a JSON body it can also be a list. |
 | `tz` | from the location | IANA time zone for the output times. |
 | `refraction` | `34` | Horizontal refraction in arcminutes. |
@@ -29,7 +29,8 @@
 | 202 | The terrain horizon for this location is being computed (the first request in a new area downloads terrain data). `sea_level`, `elevation` and `fixed` are already filled in; `visible` is `{"status": "computing"}`. Retry the same request after `retry_after_s` seconds (also sent as a `Retry-After` header). |
 | 400 | Bad parameters. `error` says which. |
 | 404 | Address not found. |
-| 500 | Horizon computation failed (usually a terrain download problem). It is retried after 10 minutes. |
+| 500 | Horizon computation failed. It is retried after 10 minutes. |
+| 503 | A data source (address lookup or terrain) is temporarily unreachable. Retry in a minute. |
 
 ## Response
 
@@ -63,7 +64,7 @@
 }
 ```
 
-`address` only appears when an address was given. Times are ISO 8601 in the location's time zone, rounded to the second. A zman that doesn't happen on that day (the sun never sets, or never gets 16.1° below the horizon) is `null`.
+`address` only appears when an address was given. `ground_m` and `ground_source` are `null` when only `sea_level` was requested, since no terrain is looked up. Times are ISO 8601 in the location's time zone, rounded to the second. A zman that doesn't happen on that day (the sun never sets, or never gets 16.1° below the horizon) is `null`.
 
 ### `fixed`
 

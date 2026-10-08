@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -24,6 +25,12 @@ GDAL_ENV = {
 FETCH_THREADS = 8
 RETRIES = 4
 MOSAIC_MAX_PIXELS = 64_000_000
+HANDLES_PER_THREAD = 24
+
+# All block downloads go through one long-lived pool, so its threads keep their open datasets between calls, and a block already being downloaded is waited for instead of fetched again.
+_POOL = ThreadPoolExecutor(FETCH_THREADS, thread_name_prefix="cog-fetch")
+_inflight: dict[tuple, Future] = {}
+_inflight_lock = threading.Lock()
 
 
 class MissingSource(Exception):
@@ -53,27 +60,38 @@ class RemoteCog:
         self._meta = None
         self._meta_lock = threading.Lock()
 
-    def _retry(self, level, fn):
+    @staticmethod
+    def _retry(fn, on_error=None):
         for attempt in range(RETRIES):
             try:
                 return fn()
             except RasterioIOError:
                 if attempt == RETRIES - 1:
                     raise
-                getattr(self._local, "handles", {}).pop((self.url, level), None)
+                if on_error:
+                    on_error()
                 time.sleep(2 ** attempt)
 
     def _open(self, level: int):
+        """A dataset kept open on the current pool thread, at most HANDLES_PER_THREAD per thread."""
         handles = getattr(self._local, "handles", None)
         if handles is None:
-            handles = self._local.handles = {}
-        ds = handles.get((self.url, level))
+            handles = self._local.handles = OrderedDict()
+        key = (self.url, level)
+        ds = handles.get(key)
         if ds is None:
             with rasterio.Env(**GDAL_ENV):
-                kw = {"overview_level": level - 1} if level > 0 else {}
-                ds = rasterio.open(self.url, **kw)
-            handles[(self.url, level)] = ds
+                ds = rasterio.open(self.url, **({"overview_level": level - 1} if level > 0 else {}))
+            handles[key] = ds
+            while len(handles) > HANDLES_PER_THREAD:
+                handles.popitem(last=False)[1].close()
+        handles.move_to_end(key)
         return ds
+
+    def _drop(self, level):
+        ds = getattr(self._local, "handles", {}).pop((self.url, level), None)
+        if ds is not None:
+            ds.close()
 
     @property
     def meta(self) -> dict:
@@ -92,14 +110,16 @@ class RemoteCog:
     def _read_meta(self) -> dict:
         if requests.head(self.url, timeout=30, allow_redirects=True).status_code == 404:
             return {"missing": True}
-        ds = self._retry(0, lambda: self._open(0))
-        factors, crs, nodata = ds.overviews(1), ds.crs.to_wkt(), ds.nodata
-        levels = []
-        for lv in range(len(factors) + 1):
-            ds = self._retry(lv, lambda lv=lv: self._open(lv))
-            t = ds.transform
-            bh, bw = ds.block_shapes[0]
-            levels.append({"transform": (t.c, t.a, 0.0, t.f, 0.0, t.e), "width": ds.width, "height": ds.height, "block_w": bw, "block_h": bh})
+
+        def describe(level):
+            with rasterio.Env(**GDAL_ENV), rasterio.open(self.url, **({"overview_level": level - 1} if level > 0 else {})) as ds:
+                t = ds.transform
+                bh, bw = ds.block_shapes[0]
+                lv = {"transform": (t.c, t.a, 0.0, t.f, 0.0, t.e), "width": ds.width, "height": ds.height, "block_w": bw, "block_h": bh}
+                return lv, len(ds.overviews(1)), ds.crs.to_wkt(), ds.nodata
+
+        first, n_overviews, crs, nodata = self._retry(lambda: describe(0))
+        levels = [first] + [self._retry(lambda lv=lv: describe(lv))[0] for lv in range(1, n_overviews + 1)]
         return {"url": self.url, "crs": crs, "nodata": nodata, "levels": levels}
 
     def level_for(self, resolution) -> np.ndarray:
@@ -115,7 +135,7 @@ class RemoteCog:
         lv = self.meta["levels"][level]
         x0, y0 = c * lv.block_w, r * lv.block_h
         w, h = min(lv.block_w, lv.width - x0), min(lv.block_h, lv.height - y0)
-        data = self._retry(level, lambda: self._open(level).read(1, window=Window(x0, y0, w, h))).astype(np.float32)
+        data = self._retry(lambda: self._open(level).read(1, window=Window(x0, y0, w, h)), on_error=lambda: self._drop(level)).astype(np.float32)
         nodata = self.meta["nodata"]
         bad = ~np.isfinite(data) | (np.abs(data) > 1e5)
         if nodata is not None:
@@ -124,9 +144,23 @@ class RemoteCog:
         self.store.save_chunk(self._rel(level, r, c), data, pinned=pinned)
         return data
 
+    def _submit(self, level, r, c, pinned=False) -> Future:
+        key = (self.key, level, r, c, pinned)
+        with _inflight_lock:
+            fut = _inflight.get(key)
+            if fut is None:
+                def job():
+                    try:
+                        return self._fetch(level, r, c, pinned)
+                    finally:
+                        with _inflight_lock:
+                            _inflight.pop(key, None)
+                fut = _inflight[key] = _POOL.submit(job)
+        return fut
+
     def chunk(self, level, r, c):
         arr = self.store.load_chunk(self._rel(level, r, c))
-        return arr if arr is not None else self._fetch(level, r, c)
+        return arr if arr is not None else self._submit(level, r, c).result()
 
     def ensure(self, level, blocks, pinned=False):
         """Download any of the (row, col) blocks not on disk yet. With ``pinned`` they go to the pinned store."""
@@ -140,10 +174,8 @@ class RemoteCog:
                     todo.append(b)
         else:
             todo = [b for b in blocks if self.store.find(self._rel(level, *b)) is None]
-        if not todo:
-            return
-        with ThreadPoolExecutor(FETCH_THREADS) as pool:
-            list(pool.map(lambda b: self._fetch(level, b[0], b[1], pinned), todo))
+        for fut in [self._submit(level, r, c, pinned) for r, c in todo]:
+            fut.result()
 
     def blocks_for_bbox(self, level, x_min, y_min, x_max, y_max):
         lv = self.meta["levels"][level]

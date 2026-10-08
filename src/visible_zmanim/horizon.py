@@ -74,15 +74,11 @@ class Profile:
     block_src: np.ndarray
     ground_source: str = ""
 
-    @property
-    def eye_m(self):
-        return self.ground_m + self.eye_height_m
-
     def bin(self, az):
         return np.rint(np.asarray(az) / self.step).astype(int) % len(self.threshold)
 
-    def margin(self, alt, az, sd):
-        """How far (deg) the highest visible part of the sun's disk is above the horizon; positive means some of it is visible."""
+    def margin(self, alt, az, sd, return_bin=False):
+        """How far (deg) the highest visible part of the sun's disk is above the horizon; positive means some of it is visible. With return_bin, also the azimuth bin where that happens."""
         alt, az, sd = (np.asarray(a, dtype=float) for a in (alt, az, sd))
         n = len(self.threshold)
         reach = int(math.ceil(float(np.max(sd)) / self.step / 0.5)) + 1
@@ -93,7 +89,10 @@ class Profile:
         inside = np.abs(x) < sd[..., None]
         limb = alt[..., None] + np.sqrt(np.maximum(sd[..., None] ** 2 - x**2, 0.0))
         m = np.where(inside, limb - self.threshold[bins], -np.inf)
-        return m.max(axis=-1)
+        if not return_bin:
+            return m.max(axis=-1)
+        j = m.argmax(axis=-1)
+        return np.take_along_axis(m, j[..., None], -1)[..., 0], np.take_along_axis(bins, j[..., None], -1)[..., 0]
 
     def save(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,10 +110,11 @@ class Profile:
         return cls(**kw)
 
 
-def compute_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None) -> Profile:
+def compute_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, known_ground: tuple | None = None) -> Profile:
+    """``ground_m`` overrides the ground height; ``known_ground`` is a (height, source) pair already looked up, to avoid doing it twice."""
     ground_source = "given"
     if ground_m is None:
-        ground_m, ground_source = terrain.ground(lat, lon)
+        ground_m, ground_source = known_ground or terrain.ground(lat, lon)
     eye = ground_m + eye_height_m
     n_bins = int(round(360.0 / settings.azimuth_step_deg))
     all_az = np.arange(n_bins) * settings.azimuth_step_deg
@@ -186,11 +186,25 @@ def profile_key(lat, lon, eye_height_m, ground_m, physics: Physics, settings: Ho
     return hashlib.sha1(json.dumps(key, sort_keys=True).encode()).hexdigest()
 
 
-def get_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, cache_dir: Path | None = None) -> Profile:
+def _paths(lat, lon, eye_height_m, ground_m, physics, settings, terrain, cache_dir):
     folder = Path(cache_dir or data_dir() / "dem" / "cache" / "horizon")
-    path = folder / f"{profile_key(lat, lon, eye_height_m, ground_m, physics, settings, terrain)}.npz"
+    folder.mkdir(parents=True, exist_ok=True)
+    key = profile_key(lat, lon, eye_height_m, ground_m, physics, settings, terrain)
+    return key, folder / f"{key}.npz", folder / f"{key}.error", folder / f"{key}.lock"
+
+
+def _load(path: Path) -> Profile:
+    try:
+        os.utime(path)  # keeps popular profiles from being evicted first
+    except OSError:
+        pass
+    return Profile.load(path)
+
+
+def get_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, cache_dir: Path | None = None) -> Profile:
+    _, path, _, _ = _paths(lat, lon, eye_height_m, ground_m, physics, settings, terrain, cache_dir)
     if path.exists():
-        return Profile.load(path)
+        return _load(path)
     p = compute_profile(lat, lon, eye_height_m, terrain=terrain, physics=physics, settings=settings, ground_m=ground_m)
     p.save(path)
     return p
@@ -199,53 +213,69 @@ def get_profile(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = 
 _running: dict[str, threading.Event] = {}
 _running_lock = threading.Lock()
 ERROR_TTL_S = 600
+UNAVAILABLE_TTL_S = 60
 
 
 class ProfileError(Exception):
     pass
 
 
-def get_profile_async(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, wait_s: float = 20.0, cache_dir: Path | None = None) -> Profile | None:
-    """Like get_profile, but gives up after wait_s and returns None while the computation continues in the background. Only one process computes a given profile at a time."""
-    folder = Path(cache_dir or data_dir() / "dem" / "cache" / "horizon")
-    folder.mkdir(parents=True, exist_ok=True)
-    key = profile_key(lat, lon, eye_height_m, ground_m, physics, settings, terrain)
-    path, err = folder / f"{key}.npz", folder / f"{key}.error"
+def _recent_error(err: Path):
+    try:
+        text, age = err.read_text(), time.time() - err.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    if age < (UNAVAILABLE_TTL_S if text.startswith("TerrainUnavailable") else ERROR_TTL_S):
+        return text
+    err.unlink(missing_ok=True)
+    return None
+
+
+def get_profile_async(lat, lon, eye_height_m, *, terrain: Terrain, physics: Physics = DEFAULT_PHYSICS, settings: HorizonSettings = DEFAULT_HORIZON, ground_m: float | None = None, known_ground: tuple | None = None, wait_s: float = 20.0, cache_dir: Path | None = None) -> Profile | None:
+    """Like get_profile, but gives up after wait_s and returns None while the computation continues in the background. Only one process computes a given profile at a time; others wait for its file."""
+    key, path, err, lock_path = _paths(lat, lon, eye_height_m, ground_m, physics, settings, terrain, cache_dir)
     if path.exists():
-        return Profile.load(path)
-    if err.exists():
-        if time.time() - err.stat().st_mtime < ERROR_TTL_S:
-            raise ProfileError(err.read_text())
-        err.unlink(missing_ok=True)
+        return _load(path)
+    text = _recent_error(err)
+    if text:
+        raise ProfileError(text)
+    deadline = time.time() + wait_s
     with _running_lock:
         event = _running.get(key)
         if event is None:
-            lock = open(folder / f"{key}.lock", "w")
+            lock = open(lock_path, "w")
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 lock.close()
-                return None
-            if path.exists():
-                lock.close()
-                return Profile.load(path)
-            event = _running[key] = threading.Event()
-
-            def run():
-                try:
-                    compute_profile(lat, lon, eye_height_m, terrain=terrain, physics=physics, settings=settings, ground_m=ground_m).save(path)
-                except Exception as e:
-                    err.write_text(f"{type(e).__name__}: {e}")
-                finally:
+                lock = None
+            if lock is not None:
+                if path.exists():
                     lock.close()
-                    with _running_lock:
-                        _running.pop(key, None)
-                    event.set()
+                    return _load(path)
+                event = _running[key] = threading.Event()
 
-            threading.Thread(target=run, daemon=True).start()
-    event.wait(wait_s)
+                def run():
+                    try:
+                        compute_profile(lat, lon, eye_height_m, terrain=terrain, physics=physics, settings=settings, ground_m=ground_m, known_ground=known_ground).save(path)
+                    except Exception as e:
+                        err.write_text(f"{type(e).__name__}: {e}")
+                    finally:
+                        lock.close()
+                        with _running_lock:
+                            _running.pop(key, None)
+                        event.set()
+
+                threading.Thread(target=run, daemon=True).start()
+    if event is not None:
+        event.wait(wait_s)
+    else:
+        # Another process is computing it; watch for its result.
+        while time.time() < deadline and not path.exists() and not err.exists():
+            time.sleep(0.25)
     if path.exists():
-        return Profile.load(path)
-    if err.exists():
-        raise ProfileError(err.read_text())
+        return _load(path)
+    text = _recent_error(err)
+    if text:
+        raise ProfileError(text)
     return None

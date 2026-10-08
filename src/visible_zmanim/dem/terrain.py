@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import re
 import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import numpy as np
@@ -19,6 +21,11 @@ USGS1M_DATASET = "Digital Elevation Model (DEM) 1 meter"
 M_PER_DEG = 111_320.0
 INDEX_CELL = 0.1
 SOURCES = ("sea_level", "usgs_3dep_1m", "usgs_3dep_13", "gedtm30")
+CONTEXT_CACHE = 64
+
+
+class TerrainUnavailable(Exception):
+    """A data source couldn't be reached. Results computed without it would be silently worse, so nothing is computed."""
 
 
 @dataclass(frozen=True)
@@ -54,18 +61,20 @@ class Terrain:
         self._usgs13: dict[str, RemoteCog | None] = {}
         self._lidar: dict[str, RemoteCog] = {}
         self._lock = threading.Lock()
+        self._contexts: OrderedDict[tuple, tuple] = OrderedDict()
 
     # USGS 1/3 arc-second, one file per 1x1 degree tile
     def _usgs13_tile(self, name):
         with self._lock:
-            if name not in self._usgs13:
-                cog = RemoteCog(USGS13_URL.format(name=name), self.store, f"usgs13_{name}")
-                try:
-                    cog.meta
-                except MissingSource:
-                    cog = None
-                self._usgs13[name] = cog
-            return self._usgs13[name]
+            if name in self._usgs13:
+                return self._usgs13[name]
+        cog = RemoteCog(USGS13_URL.format(name=name), self.store, f"usgs13_{name}")
+        try:
+            cog.meta
+        except MissingSource:
+            cog = None
+        with self._lock:
+            return self._usgs13.setdefault(name, cog)
 
     @staticmethod
     def _usgs13_name(ilat: int, ilon: int):
@@ -77,14 +86,25 @@ class Terrain:
         return -180 <= lon <= -60 and 15 <= lat <= 72
 
     # USGS 1 m lidar, 10 km UTM tiles from several survey projects
+    @staticmethod
+    def index_rel(lat, lon):
+        return f"usgs1m_index/{math.floor(lat / INDEX_CELL)}_{math.floor(lon / INDEX_CELL)}.json"
+
     def _lidar_items(self, lat, lon):
         cell_lat, cell_lon = math.floor(lat / INDEX_CELL), math.floor(lon / INDEX_CELL)
-        rel = f"usgs1m_index/{cell_lat}_{cell_lon}.json"
+        rel = self.index_rel(lat, lon)
         items = self.store.load_json(rel)
         if items is None:
             bbox = f"{cell_lon * INDEX_CELL},{cell_lat * INDEX_CELL},{(cell_lon + 1) * INDEX_CELL},{(cell_lat + 1) * INDEX_CELL}"
-            r = requests.get(TNM_API, params={"datasets": USGS1M_DATASET, "bbox": bbox, "max": 200, "outputFormat": "JSON"}, timeout=60)
-            r.raise_for_status()
+            for attempt in range(3):
+                try:
+                    r = requests.get(TNM_API, params={"datasets": USGS1M_DATASET, "bbox": bbox, "max": 200, "outputFormat": "JSON"}, timeout=60)
+                    r.raise_for_status()
+                    break
+                except requests.RequestException as e:
+                    if attempt == 2:
+                        raise TerrainUnavailable(f"USGS lidar index unavailable: {e}") from e
+                    time.sleep(2 ** attempt)
             items = []
             for it in r.json().get("items", []):
                 m = re.search(r"_(\d+)_x(\d+)y(\d+)_", it["downloadURL"])
@@ -114,6 +134,26 @@ class Terrain:
         out.sort(key=lambda i: i["date"], reverse=True)
         return out
 
+    def _lidar_context(self, lat0, lon0):
+        """Lidar tiles around the observer, newest survey first, and a local plane per UTM zone. Built once per observer."""
+        key = (round(lat0, 7), round(lon0, 7))
+        with self._lock:
+            ctx = self._contexts.get(key)
+            if ctx is not None:
+                self._contexts.move_to_end(key)
+                return ctx
+        tiles = self.lidar_tiles_near(lat0, lon0, self.bands.lidar_max_m)
+        frames = {}
+        for it in tiles:
+            crs = f"EPSG:269{it['zone']:02d}"
+            if crs not in frames:
+                frames[crs] = _ProjectedFrame(CRS.from_user_input(crs).to_wkt(), lat0, lon0)
+        with self._lock:
+            self._contexts[key] = (tiles, frames)
+            while len(self._contexts) > CONTEXT_CACHE:
+                self._contexts.popitem(last=False)
+        return tiles, frames
+
     def heights(self, lat0, lon0, lat, lon, d, az, *, relative_step=0.002, min_res_m=1.0, with_source=False):
         """Heights for sample points given both as lat/lon and as distance/azimuth from the observer at (lat0, lon0)."""
         lat, lon, d, az = (np.asarray(a, dtype=float) for a in (lat, lon, d, az))
@@ -125,24 +165,23 @@ class Terrain:
         if us:
             near = d <= self.bands.lidar_max_m
             if near.any():
-                try:
-                    tiles = self.lidar_tiles_near(lat0, lon0, self.bands.lidar_max_m)
-                except requests.RequestException:
-                    tiles = []
+                tiles, frames = self._lidar_context(lat0, lon0)
                 near_idx = np.flatnonzero(near)
                 coords = {}
                 for it in tiles:
                     crs = f"EPSG:269{it['zone']:02d}"
                     if crs not in coords:
-                        frame = _ProjectedFrame(CRS.from_user_input(crs).to_wkt(), lat0, lon0)
-                        coords[crs] = frame.xy(d[near_idx], az[near_idx])
+                        coords[crs] = frames[crs].xy(d[near_idx], az[near_idx])
                     x, y = coords[crs]
                     inside = (x >= it["x"]) & (x < it["x"] + 10_000) & (y >= it["y"]) & (y < it["y"] + 10_000) & np.isnan(h[near_idx])
                     if not inside.any():
                         continue
                     cog = self._lidar_cog(it["url"])
+                    try:
+                        levels = cog.level_for(res_m[near_idx[inside]])
+                    except MissingSource:
+                        continue
                     idx, xs, ys = near_idx[inside], x[inside], y[inside]
-                    levels = cog.level_for(res_m[idx])
                     for lv in np.unique(levels):
                         m = levels == lv
                         h[idx[m]] = cog.sample(xs[m], ys[m], int(lv))

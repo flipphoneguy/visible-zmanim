@@ -4,14 +4,17 @@ from __future__ import annotations
 import datetime as dt
 import math
 import threading
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from zoneinfo import ZoneInfo
 
 import numpy as np
+import requests
+from rasterio.errors import RasterioIOError
 
 from .config import DEFAULT_HORIZON, DEFAULT_PHYSICS
-from .dem.terrain import SOURCES, Terrain
-from .geocode import GeocodeError, geocode
+from .dem.cog import MissingSource
+from .dem.terrain import SOURCES, Terrain, TerrainUnavailable
+from .geocode import AddressNotFound, GeocoderUnavailable, geocode
 from .horizon import ProfileError, get_profile_async
 from .sun import Sun
 from .zmanim import compute
@@ -35,6 +38,11 @@ ATTRIBUTION = {
     },
     "geocoding": "Nominatim, data (c) OpenStreetMap contributors, ODbL; US Census Geocoder",
 }
+
+try:
+    VERSION = version("visible-zmanim")
+except PackageNotFoundError:
+    VERSION = "unknown"
 
 _lock = threading.Lock()
 _terrain: Terrain | None = None
@@ -68,7 +76,7 @@ def _float(params, name, default=None, lo=-math.inf, hi=math.inf):
         return default
     try:
         v = float(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         raise BadRequest(f"{name} must be a number")
     if not (lo <= v <= hi):
         raise BadRequest(f"{name} must be between {lo} and {hi}")
@@ -83,7 +91,16 @@ def _list(params, name):
     return [str(x).strip() for x in items if str(x).strip()]
 
 
+def _text(params, name):
+    raw = params.get(name)
+    if raw is not None and not isinstance(raw, str):
+        raise BadRequest(f"{name} must be a string")
+    return raw
+
+
 def _dates(params, tz):
+    for name in ("date", "start", "end"):
+        _text(params, name)
     try:
         if params.get("start") or params.get("end"):
             start = dt.date.fromisoformat(params.get("start") or params.get("end"))
@@ -131,9 +148,15 @@ def handle(params) -> tuple[int, dict]:
         return _handle(params)
     except BadRequest as e:
         return 400, {"error": str(e)}
-    except GeocodeError as e:
+    except AddressNotFound as e:
         return 404, {"error": str(e)}
+    except GeocoderUnavailable as e:
+        return 503, {"error": str(e)}
+    except (TerrainUnavailable, RasterioIOError, requests.RequestException) as e:
+        return 503, {"error": f"terrain data is unavailable right now, try again shortly ({e})"}
     except ProfileError as e:
+        if str(e).startswith("TerrainUnavailable"):
+            return 503, {"error": f"terrain data is unavailable right now, try again shortly ({e})"}
         return 500, {"error": f"horizon computation failed: {e}"}
 
 
@@ -141,14 +164,14 @@ def _handle(params) -> tuple[int, dict]:
     location = {}
     lat, lon = _float(params, "lat", lo=-90, hi=90), _float(params, "lon", lo=-180, hi=180)
     if lat is None or lon is None:
-        address = params.get("address")
+        address = _text(params, "address")
         if not address:
             raise BadRequest("give lat and lon, or address")
         g = geocode(address)
         lat, lon = g["lat"], g["lon"]
         location["address"] = {"query": address, "matched": g["matched"], "source": g["source"], "precision": g.get("precision")}
 
-    tz_name = params.get("tz") or _timezone_at(lat, lon)
+    tz_name = _text(params, "tz") or _timezone_at(lat, lon)
     try:
         tz = ZoneInfo(tz_name)
     except Exception:
@@ -176,18 +199,22 @@ def _handle(params) -> tuple[int, dict]:
     wait = _float(params, "wait", DEFAULT_WAIT_S, lo=0, hi=MAX_WAIT_S)
 
     terrain = _shared_terrain()
-    if ground_given is None:
-        ground, ground_source = terrain.ground(lat, lon)
-    else:
-        ground, ground_source = ground_given, "given"
-    eye = ground + height
+    ground, ground_source = ground_given, "given" if ground_given is not None else None
+    if ground_given is None and ("elevation" in variants or "visible" in variants):
+        try:
+            ground, ground_source = terrain.ground(lat, lon)
+        except MissingSource as e:
+            raise TerrainUnavailable(str(e)) from e
+    # Sea-level times alone only use the observer's height for parallax, well under a tenth of a second.
+    eye = (ground or 0.0) + height
 
     profile, pending = None, False
     if "visible" in variants:
-        profile = get_profile_async(lat, lon, height, terrain=terrain, physics=physics, settings=settings, ground_m=ground_given, wait_s=wait)
+        known = (ground, ground_source) if ground_given is None else None
+        profile = get_profile_async(lat, lon, height, terrain=terrain, physics=physics, settings=settings, ground_m=ground_given, known_ground=known, wait_s=wait)
         pending = profile is None
 
-    res = compute(lat, lon, eye, dates, physics=physics, profile=profile, variants=variants, sun=Sun.shared())
+    res = compute(lat, lon, eye, dates, physics=physics, profile=profile, variants=variants, sun=Sun.shared(), tz=tz)
 
     days = []
     for i, d in enumerate(dates):
@@ -213,7 +240,7 @@ def _handle(params) -> tuple[int, dict]:
 
     location.update({
         "lat": round(lat, 6), "lon": round(lon, 6), "timezone": tz_name,
-        "ground_m": round(ground, 2), "ground_source": ground_source,
+        "ground_m": None if ground is None else round(ground, 2), "ground_source": ground_source,
         "height_m": height, "eye_elevation_m": round(eye, 2),
     })
     body = {
@@ -221,7 +248,7 @@ def _handle(params) -> tuple[int, dict]:
         "settings": {"variants": variants, "min_distance_m": min_distance, "refraction_arcmin": physics.horizon_refraction_arcmin, "terrestrial_k": physics.terrestrial_k},
         "days": days,
         "sources": ATTRIBUTION,
-        "version": version("visible-zmanim"),
+        "version": VERSION,
     }
     if "horizon" in include and profile is not None and len(dates) == 1 and "visible" in res["variants"]:
         body["horizon"] = {e: _horizon_view(profile, res["variants"]["visible"], e, lat, lon, eye, physics, tz) for e in ("sunrise", "sunset")}
@@ -234,7 +261,7 @@ def _handle(params) -> tuple[int, dict]:
 
 
 def _horizon_view(profile, visible, event, lat, lon, eye, physics, tz):
-    """Skyline around the event direction and the sun's apparent path past it. The path is shifted by the same refraction the threshold uses, so the sun's edge touches the skyline exactly at the computed time."""
+    """Skyline around the event direction and the sun's apparent path past it. At each moment the path is shifted by the refraction of the skyline point the sun's disk is closest to clearing, the same point the calculation uses, so the disk touches the skyline exactly at the computed time."""
     t_event, az_event = visible[event][0], visible[f"{event}_azimuth"][0]
     if not (np.isfinite(t_event) and np.isfinite(az_event)):
         return None
@@ -246,8 +273,8 @@ def _horizon_view(profile, visible, event, lat, lon, eye, physics, tz):
     times = t_event + np.arange(-VIEW_PATH_S, VIEW_PATH_S + 1, VIEW_PATH_STEP_S)
     track = Sun.shared().track(lat, lon, eye, times[0], times[-1])
     alt, saz, dist = track.altaz(times)
-    sb = profile.bin(saz)
-    lift = profile.block_e[sb] - profile.threshold[sb]
+    _, sb = profile.margin(alt, saz, track.semidiameter(dist, physics), return_bin=True)
+    lift = np.where(profile.computed[sb], profile.block_e[sb] - profile.threshold[sb], np.nan)
     inside = np.abs((saz - az_event + 180) % 360 - 180) <= VIEW_HALF_WIDTH_DEG
     def hms(t):
         return dt.datetime.fromtimestamp(round(float(t)), tz).strftime("%H:%M:%S")
@@ -260,7 +287,7 @@ def _horizon_view(profile, visible, event, lat, lon, eye, physics, tz):
         "sun_path": {
             "time": [hms(t) for t in times[inside]],
             "azimuth": [round(float(a), 3) for a in saz[inside]],
-            "altitude_deg": [round(float(v), 3) for v in (alt + lift)[inside]],
+            "altitude_deg": [None if not np.isfinite(v) else round(float(v), 3) for v in (alt + lift)[inside]],
         },
     }
 

@@ -2,6 +2,7 @@ import datetime as dt
 import json
 from collections import defaultdict
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
@@ -48,7 +49,7 @@ def diffs(calculator):
     for place, rows in load(calculator).items():
         r0 = rows[0]
         dates = [dt.date.fromisoformat(r["date"]) for r in rows]
-        res = compute(r0["lat"], r0["lon"], r0["elevation"], dates, physics=KJ_PHYSICS, variants=("sea_level", "elevation"))
+        res = compute(r0["lat"], r0["lon"], r0["elevation"], dates, physics=KJ_PHYSICS, variants=("sea_level", "elevation"), tz=ZoneInfo(r0["zone"]))
         sea, elev, fixed = res["variants"]["sea_level"], res["variants"]["elevation"], res["fixed"]
         for i, r in enumerate(rows):
             pairs = [(k, sea[v][i]) for k, v in SEA_LEVEL_KEYS.items()]

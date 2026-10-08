@@ -22,6 +22,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     if a.cmd == "zmanim":
+        bad = [kv for kv in a.params if "=" not in kv]
+        if bad:
+            ap.error(f"zmanim parameters must look like key=value, got: {' '.join(bad)}")
         status, body = handle(dict(kv.split("=", 1) for kv in a.params))
         print(json.dumps(body, indent=1))
         return 0 if status < 300 else 1
@@ -41,7 +44,7 @@ def main(argv=None):
     terrain = Terrain()
     for name in names:
         if a.plan:
-            jobs = prefetch.plan(terrain, prefetch.REGIONS[name])
+            jobs, _ = prefetch.plan(terrain, prefetch.REGIONS[name])
             counts = {}
             for cog, lv, blocks in jobs:
                 family = cog.key.split("_")[0]

@@ -41,12 +41,14 @@ def _level_reach(res0_m, n_levels, relative_step, max_d):
         out.append((lv, reach))
         if reach >= max_d:
             break
+    # Farther samples are clipped to the coarsest level, so it has to cover the rest of the range.
+    out[-1] = (out[-1][0], max_d)
     return out
 
 
 def plan(terrain: Terrain, bbox, *, relative_step=DEFAULT_HORIZON.relative_step, max_d=DEFAULT_HORIZON.max_distance_m):
-    """List of (cog, level, blocks) needed for observers inside bbox."""
-    jobs = []
+    """(jobs, pins): the (cog, level, blocks) needed for observers inside bbox, and the small metadata files those lookups depend on."""
+    jobs, pins = [], set()
     lon0, lat0, lon1, lat1 = bbox
     us = terrain.use_usgs and terrain._maybe_us((lat0 + lat1) / 2, (lon0 + lon1) / 2)
 
@@ -58,11 +60,13 @@ def plan(terrain: Terrain, bbox, *, relative_step=DEFAULT_HORIZON.relative_step,
                 cells.add((min(la, lidar_box[3]), min(lo, lidar_box[2])))
         items = {}
         for la, lo in cells:
+            pins.add(terrain.index_rel(la, lo))
             for it in terrain._lidar_items(la, lo):
                 items[it["url"]] = it
         for it in items.values():
             to_utm = Transformer.from_crs("EPSG:4326", CRS.from_user_input(f"EPSG:269{it['zone']:02d}"), always_xy=True)
             cog = terrain._lidar_cog(it["url"])
+            pins.add(f"{cog.key}/meta.json")
             try:
                 levels = cog.meta["levels"]
             except MissingSource:
@@ -78,7 +82,9 @@ def plan(terrain: Terrain, bbox, *, relative_step=DEFAULT_HORIZON.relative_step,
         box13 = _expand(bbox, terrain.bands.usgs13_max_m)
         for ilat in range(math.ceil(box13[1]), math.ceil(box13[3]) + 1):
             for ilon in range(math.floor(box13[0]), math.floor(box13[2]) + 1):
-                cog = terrain._usgs13_tile(terrain._usgs13_name(ilat, ilon))
+                name = terrain._usgs13_name(ilat, ilon)
+                pins.add(f"usgs13_{name}/meta.json")
+                cog = terrain._usgs13_tile(name)
                 if cog is None:
                     continue
                 res0 = cog.meta["levels"][0].res * M_PER_DEG
@@ -91,16 +97,19 @@ def plan(terrain: Terrain, bbox, *, relative_step=DEFAULT_HORIZON.relative_step,
 
     # GEDTM also fills in wherever USGS has no data (open sea, across the border), so it is needed at every distance.
     g = terrain.gedtm
+    pins.add(f"{g.key}/meta.json")
     res0 = g.meta["levels"][0].res * M_PER_DEG
     for lv, reach in _level_reach(res0, len(g.meta["levels"]), relative_step, max_d):
         b = _expand(bbox, reach)
         jobs.append((g, lv, g.blocks_for_bbox(lv, *b)))
-    return jobs
+    return jobs, sorted(pins)
 
 
 def run(name: str, terrain: Terrain | None = None, log=print):
     terrain = terrain or Terrain()
-    jobs = plan(terrain, REGIONS[name])
+    jobs, pins = plan(terrain, REGIONS[name])
+    for rel in pins:
+        terrain.store.promote(rel)
     total = sum(len(b) for _, _, b in jobs)
     log(f"{name}: {total} blocks in {len(jobs)} groups")
     done = 0

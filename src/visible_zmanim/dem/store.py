@@ -16,12 +16,12 @@ MEMORY_BYTES = int(float(os.environ.get("VISIBLE_ZMANIM_MEMORY_MB", "1024")) * 1
 
 
 def encode(a: np.ndarray) -> dict:
-    """Lossless to 1 cm (1 dm for chunks spanning more than 655 m of relief, which only happens far away)."""
+    """Heights to the nearest centimeter, as int16 when the block spans under 327 m of relief and int32 otherwise."""
     finite = np.isfinite(a)
     if not finite.any():
         return {"empty": np.array(a.shape)}
     lo, hi = float(np.nanmin(a)), float(np.nanmax(a))
-    for scale, dtype in ((0.01, np.int16), (0.1, np.int16), (0.01, np.int32)):
+    for scale, dtype in ((0.01, np.int16), (0.01, np.int32)):
         info = np.iinfo(dtype)
         if (hi - lo) / scale < info.max - 1:
             q = np.where(finite, np.rint((np.nan_to_num(a) - lo) / scale), info.min).astype(dtype)
@@ -123,13 +123,23 @@ class TileStore:
             writer(f)
         os.replace(tmp, target)
         if not pinned:
-            self._written += target.stat().st_size
-            if self._written > self.cap // 50:
-                self._written = 0
-                self.evict()
+            size = target.stat().st_size
+            with self._mem_lock:
+                self._written += size
+                due = self._written > self.cap // 50
+                if due:
+                    self._written = 0
+            if due:
+                threading.Thread(target=self.evict, daemon=True).start()
 
     def cache_size(self) -> int:
-        return sum(p.stat().st_size for p in self.cache.rglob("*") if p.is_file())
+        total = 0
+        for p in self.cache.rglob("*"):
+            try:
+                total += p.stat().st_size if p.is_file() else 0
+            except FileNotFoundError:
+                pass
+        return total
 
     def evict(self) -> int:
         """Delete least recently used cache files until the cache is under 90% of the cap. Returns bytes freed."""
@@ -138,7 +148,17 @@ class TileStore:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return 0
-            files = [(st.st_mtime, st.st_size, p) for p in self.cache.rglob("*") if p.is_file() and not p.name.endswith(".tmp") for st in [p.stat()]]
+            files = []
+            for p in self.cache.rglob("*"):
+                # Skip files being written (".tmp") and held job locks.
+                if ".tmp" in p.name or p.name.endswith(".lock"):
+                    continue
+                try:
+                    st = p.stat()
+                except FileNotFoundError:
+                    continue
+                if p.is_file():
+                    files.append((st.st_mtime, st.st_size, p))
             total = sum(s for _, s, _ in files)
             if total <= self.cap:
                 return 0
