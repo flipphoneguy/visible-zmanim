@@ -4,7 +4,7 @@ Visible sunrise and sunset (netz and shkia) over real terrain, plus the zmanim b
 
 Standard zmanim calculators, including KosherJava, assume a flat horizon. Where hills or mountains block the sun, the sun you actually see rises later and sets earlier, sometimes by many minutes. This package traces the horizon around any point using bare-earth elevation data (1 m lidar where available) and finds the moment the first sliver of the sun appears and the last sliver disappears.
 
-**Try it:** [tools.flipphoneguy.duckdns.org/zmanim](https://tools.flipphoneguy.duckdns.org/zmanim) has an easy page with address search, a map, horizon drawings and monthly tables. The same calculations are available as a public API at `https://api.flipphoneguy.duckdns.org/zmanim`, for example [`?lat=40.0941&lon=-74.2150`](https://api.flipphoneguy.duckdns.org/zmanim?lat=40.0941&lon=-74.2150) (parameters in [docs/api.md](docs/api.md)).
+**Try it:** [tools.flipphoneguy.duckdns.org/zmanim](https://tools.flipphoneguy.duckdns.org/zmanim) has an easy page with address search, a map, horizon drawings and monthly tables. The same calculations are available as a public API at `https://api.flipphoneguy.duckdns.org/zmanim`, for example [`?lat=40.0941&lon=-74.2150`](https://api.flipphoneguy.duckdns.org/zmanim?lat=40.0941&lon=-74.2150) (parameters in [docs/api.md](docs/api.md)). There is also a small Android app: [visible-zmanim-android](https://github.com/flipphoneguy/visible-zmanim-android).
 
 For every date it returns three versions of sunrise and sunset, each with its own derived zmanim:
 
