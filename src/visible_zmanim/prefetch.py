@@ -97,6 +97,15 @@ def plan(terrain: Terrain, bbox, *, relative_step=DEFAULT_HORIZON.relative_step,
                     if x_min < x_max and y_min < y_max:
                         jobs.append((cog, lv, cog.blocks_for_bbox(lv, x_min, y_min, x_max, y_max)))
 
+    if terrain._maybe_england((lat0 + lat1) / 2, (lon0 + lon1) / 2):
+        eng = terrain.england
+        pins.add(f"{eng.key}/meta.json")
+        to_bng = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
+        for lv, reach in _level_reach(1.0, len(eng.meta["levels"]), relative_step, terrain.bands.lidar_max_m):
+            box = _expand(bbox, reach)
+            xs, ys = to_bng.transform([box[0], box[2], box[0], box[2]], [box[1], box[1], box[3], box[3]])
+            jobs.append((eng, lv, eng.blocks_for_bbox(lv, min(xs), min(ys), max(xs), max(ys))))
+
     # GEDTM also fills in wherever USGS has no data (open sea, across the border), so it is needed at every distance.
     g = terrain.gedtm
     pins.add(f"{g.key}/meta.json")

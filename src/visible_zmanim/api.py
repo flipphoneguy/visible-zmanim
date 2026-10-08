@@ -35,6 +35,7 @@ ATTRIBUTION = {
         "usgs_3dep_1m": "USGS 3D Elevation Program 1 m lidar DEM (public domain)",
         "usgs_3dep_13": "USGS 3D Elevation Program 1/3 arc-second DEM (public domain)",
         "gedtm30": "GEDTM30 v1.2, OpenGeoHub, CC BY 4.0 (doi:10.5281/zenodo.14900181)",
+        "ea_lidar_1m": "Environment Agency LIDAR Composite DTM 1m, (c) Environment Agency copyright and/or database right, Open Government Licence v3.0",
     },
     "geocoding": "Nominatim, data (c) OpenStreetMap contributors, ODbL; US Census Geocoder",
 }

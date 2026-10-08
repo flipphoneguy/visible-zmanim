@@ -13,6 +13,7 @@ from pyproj import CRS, Proj, Transformer
 
 from .cog import MissingSource, RemoteCog
 from .store import TileStore
+from .wcs import EnglandLidar
 
 GEDTM_URL = "https://s3.opengeohub.org/global/dtm/v1.2/gedtm_rf_m_30m_s_20060101_20151231_go_epsg.4326.3855_v1.2.tif"
 USGS13_URL = "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/{name}/USGS_13_{name}.tif"
@@ -20,7 +21,8 @@ TNM_API = "https://tnmaccess.nationalmap.gov/api/v1/products"
 USGS1M_DATASET = "Digital Elevation Model (DEM) 1 meter"
 M_PER_DEG = 111_320.0
 INDEX_CELL = 0.1
-SOURCES = ("sea_level", "usgs_3dep_1m", "usgs_3dep_13", "gedtm30")
+SOURCES = ("sea_level", "usgs_3dep_1m", "usgs_3dep_13", "gedtm30", "ea_lidar_1m")
+BNG = "EPSG:27700"
 CONTEXT_CACHE = 64
 
 
@@ -51,13 +53,15 @@ class _ProjectedFrame:
 
 
 class Terrain:
-    """Bare-earth heights from USGS 3DEP (1 m lidar, 1/3 arc-second) where available, else GEDTM30, else sea level (0 m)."""
+    """Bare-earth heights from 1 m lidar near the observer (USGS 3DEP in the US, the Environment Agency composite in England), USGS 1/3 arc-second within 50 km in the US, else GEDTM30, else sea level (0 m)."""
 
     def __init__(self, store: TileStore | None = None, bands: Bands = Bands(), use_usgs: bool = True):
         self.store = store or TileStore()
         self.bands = bands
         self.use_usgs = use_usgs
         self.gedtm = RemoteCog(GEDTM_URL, self.store, "gedtm30_v1.2")
+        self.england = EnglandLidar(self.store)
+        self._bng: dict[tuple, _ProjectedFrame] = {}
         self._usgs13: dict[str, RemoteCog | None] = {}
         self._lidar: dict[str, RemoteCog] = {}
         self._lock = threading.Lock()
@@ -84,6 +88,22 @@ class Terrain:
     @staticmethod
     def _maybe_us(lat, lon):
         return -180 <= lon <= -60 and 15 <= lat <= 72
+
+    @staticmethod
+    def _maybe_england(lat, lon):
+        return -6.5 <= lon <= 2.0 and 49.8 <= lat <= 55.9
+
+    def _bng_frame(self, lat0, lon0):
+        key = (round(lat0, 7), round(lon0, 7))
+        with self._lock:
+            frame = self._bng.get(key)
+        if frame is None:
+            frame = _ProjectedFrame(CRS.from_user_input(BNG).to_wkt(), lat0, lon0)
+            with self._lock:
+                if len(self._bng) > CONTEXT_CACHE:
+                    self._bng.clear()
+                self._bng[key] = frame
+        return frame
 
     # USGS 1 m lidar, 10 km UTM tiles from several survey projects
     @staticmethod
@@ -187,6 +207,19 @@ class Terrain:
                         h[idx[m]] = cog.sample(xs[m], ys[m], int(lv))
                     src[idx[~np.isnan(h[idx])]] = 1
 
+        if self._maybe_england(lat0, lon0):
+            near = (d <= self.bands.lidar_max_m) & np.isnan(h)
+            frame = self._bng_frame(lat0, lon0)
+            if near.any() and self.england.covers(frame.x0, frame.y0):
+                idx = np.flatnonzero(near)
+                x, y = frame.xy(d[idx], az[idx])
+                levels = self.england.level_for(res_m[idx])
+                for lv in np.unique(levels):
+                    m = levels == lv
+                    h[idx[m]] = self.england.sample(x[m], y[m], int(lv))
+                src[idx[~np.isnan(h[idx])]] = 4
+
+        if us:
             mid = (d <= self.bands.usgs13_max_m) & np.isnan(h)
             if mid.any():
                 idx_mid = np.flatnonzero(mid)

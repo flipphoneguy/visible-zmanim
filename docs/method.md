@@ -71,15 +71,15 @@ Because the threshold is looked up in the direction the sun actually is at each 
 
 All data is bare earth (a terrain model, not a surface model), so trees and buildings are not included.
 
-| Distance | US and border areas | Everywhere else |
-|---|---|---|
-| up to 3 km | USGS 3DEP 1 m lidar | GEDTM30 |
-| 3 to 50 km | USGS 3DEP 1/3 arc-second (~10 m) | GEDTM30 |
-| beyond 50 km | GEDTM30 | GEDTM30 |
+| Distance | US and border areas | England | Everywhere else |
+|---|---|---|---|
+| up to 3 km | USGS 3DEP 1 m lidar | Environment Agency 1 m lidar | GEDTM30 |
+| 3 to 50 km | USGS 3DEP 1/3 arc-second (~10 m) | GEDTM30 | GEDTM30 |
+| beyond 50 km | GEDTM30 | GEDTM30 | GEDTM30 |
 
 Where a dataset has no data (open sea, across a border), the next one fills in. Where none has data, the height is 0 (sea level).
 
-The files are read straight from their public cloud copies, one block at a time, at the coarsest zoom level that is still fine enough for the distance (about 0.2% of the distance). Far terrain therefore costs little. Blocks are stored as compressed whole centimeters relative to each block's lowest point, which is accurate to 5 mm and about 4.5 times smaller than raw. Stored blocks are kept in two places: `pinned` (regions downloaded ahead of time, never deleted) and `cache` (everything else, oldest removed when the cache passes its size limit).
+The files are read straight from their public cloud copies (the English lidar from the Environment Agency's coverage service), one block at a time, at the coarsest zoom level that is still fine enough for the distance (about 0.2% of the distance). Far terrain therefore costs little. Blocks are stored as compressed whole centimeters relative to each block's lowest point, which is accurate to 5 mm and about 4.5 times smaller than raw. Stored blocks are kept in two places: `pinned` (regions downloaded ahead of time, never deleted) and `cache` (everything else, oldest removed when the cache passes its size limit).
 
 Accuracy of the data, roughly: lidar to about 10 cm, the 1/3 arc-second data to about 1 to 2 m, GEDTM30 to about 4 m. A height error matters most up close: 3 m of error at 2 km shifts sunrise by about 25 seconds at 41° north, and the same error at 20 km by about 3 seconds.
 

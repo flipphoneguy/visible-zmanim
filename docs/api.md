@@ -95,7 +95,7 @@ The same fields in each, computed from that version's sunrise and sunset. A GRA 
 | `shaah_zmanis_gra_s`, `shaah_zmanis_mga_72_s` | Length of the hours in seconds. |
 | `sunrise_azimuth`, `sunset_azimuth` | Compass direction of the sun at those moments, degrees from true north. |
 
-`visible` also has `sunrise_details` and `sunset_details`. `blocking` is the terrain point the sun clears in that direction: its position, distance, height above sea level, the angle it appears at from the observer, and which dataset the height came from. When nothing in range is higher than the sea horizon, the sea horizon itself is reported with source `sea_level`. `vs_sea_level_s` is the difference from the `sea_level` time in seconds.
+`visible` also has `sunrise_details` and `sunset_details`. `blocking` is the terrain point the sun clears in that direction: its position, distance, height above sea level, the angle it appears at from the observer, and which dataset the height came from. The source is one of `usgs_3dep_1m`, `usgs_3dep_13`, `ea_lidar_1m`, `gedtm30`, or `sea_level` when nothing in range is higher than the sea horizon and the sea horizon itself is reported. `vs_sea_level_s` is the difference from the `sea_level` time in seconds.
 
 ### `horizon`
 

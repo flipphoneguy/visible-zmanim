@@ -56,7 +56,7 @@ visible-zmanim cache                   # cache size, and evict down to the cap
 
 Sun positions come from NASA JPL's DE440s ephemeris through Skyfield. The sea-level times are tested against KosherJava's SPA calculator on 192 place and date combinations (including the Arctic and high altitude) and agree to about 0.1 s.
 
-The visible times are only as good as the terrain data and the atmosphere. Bare-earth lidar is accurate to centimeters; the global 30 m model used outside the US is accurate to a few meters, which matters most for ridges within a few kilometers. Refraction near the horizon changes with the weather and can move a real sunrise by tens of seconds, occasionally more over cold water or snow. Expect the visible times to be within about half a minute on a normal day. Published research comparing calculated and observed sunrises in Jerusalem found about ±15 s for most of the year with a similar method (Keller and Hall, Computers & Geosciences 161, 2022).
+The visible times are only as good as the terrain data and the atmosphere. Bare-earth lidar (US and England) is accurate to centimeters; the global 30 m model used elsewhere is accurate to a few meters, which matters most for ridges within a few kilometers. Refraction near the horizon changes with the weather and can move a real sunrise by tens of seconds, occasionally more over cold water or snow. Expect the visible times to be within about half a minute on a normal day. Published research comparing calculated and observed sunrises in Jerusalem found about ±15 s for most of the year with a similar method (Keller and Hall, Computers & Geosciences 161, 2022).
 
 ## Data sources
 
@@ -65,6 +65,7 @@ The visible times are only as good as the terrain data and the atmosphere. Bare-
 | [JPL DE440s](https://ssd.jpl.nasa.gov/planets/eph_export.html) via [Skyfield](https://rhodesmill.org/skyfield/) | Sun position | Public domain / MIT |
 | [USGS 3DEP](https://www.usgs.gov/3d-elevation-program) 1 m lidar DEM | Terrain within 3 km, US | Public domain |
 | USGS 3DEP 1/3 arc-second DEM | Terrain within 50 km, US and border areas | Public domain |
+| [Environment Agency LIDAR Composite DTM](https://environment.data.gov.uk/dataset/13787b9a-26a4-4775-8523-806d13af58fc) 1 m | Terrain within 3 km, England | Open Government Licence v3.0 |
 | [GEDTM30](https://doi.org/10.5281/zenodo.14900181) v1.2 (OpenGeoHub) | Terrain everywhere else | CC BY 4.0 |
 | [Nominatim](https://nominatim.org/) | Address lookup | Data © OpenStreetMap contributors, ODbL |
 | [US Census Geocoder](https://geocoding.geo.census.gov/) | US street addresses | Public domain |
