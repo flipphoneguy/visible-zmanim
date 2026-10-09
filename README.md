@@ -85,4 +85,4 @@ pytest
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+AGPL-3.0, with added attribution terms: anything based on this code that has a user interface has to credit it. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
