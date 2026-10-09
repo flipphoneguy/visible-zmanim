@@ -3,7 +3,7 @@ import json
 import sys
 
 from . import prefetch
-from .api import handle
+from .api import MAX_WAIT_S, handle
 from .dem.store import TileStore
 from .dem.terrain import Terrain
 
@@ -25,7 +25,12 @@ def main(argv=None):
         bad = [kv for kv in a.params if "=" not in kv]
         if bad:
             ap.error(f"zmanim parameters must look like key=value, got: {' '.join(bad)}")
-        status, body = handle(dict(kv.split("=", 1) for kv in a.params))
+        params = dict(kv.split("=", 1) for kv in a.params)
+        status, body = handle(params)
+        # The horizon is computed in a thread of this process, so keep it alive until it's done.
+        while status == 202:
+            print("computing the horizon (the first point in a new area downloads terrain)...", file=sys.stderr, flush=True)
+            status, body = handle({**params, "wait": MAX_WAIT_S})
         print(json.dumps(body, indent=1))
         return 0 if status < 300 else 1
     if a.cmd == "regions":
